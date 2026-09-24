@@ -1037,6 +1037,7 @@ function UI:Slider(text, min, max, default, cb)
             paint()
             cfgSet(self, "Slider", text, v)
         end,
+        Show = function(v) holder.Visible = v ~= false end,
     }
 end
 
@@ -1228,90 +1229,106 @@ function UI:ColorPicker(text, default, cb)
 
     head.Activated:Connect(function() box.Visible = not box.Visible end)
 
-    local rgb = { 255, 255, 255 }
-    if typeof(default) == "Color3" then
-        rgb = { math.floor(default.R * 255 + 0.5), math.floor(default.G * 255 + 0.5),
-                math.floor(default.B * 255 + 0.5) }
-    end
+    local hue, sat, val = 0, 0, 1
+    if typeof(default) == "Color3" then hue, sat, val = default:ToHSV() end
 
-    local function cur() return Color3.fromRGB(rgb[1], rgb[2], rgb[3]) end
+    local svCur, hCur, svBg
+    local function cur() return Color3.fromHSV(hue, sat, val) end
     local function paint()
         local c = cur()
         swatch.BackgroundColor3 = c
         preview.BackgroundColor3 = c
+        svBg.BackgroundColor3 = Color3.fromHSV(hue, 1, 1)
+        svCur.Position = UDim2.new(sat, -4, 1 - val, -4)
+        hCur.Position = UDim2.new(hue, -2, 0, 0)
     end
 
-    local rows = {}
-    for i, ch in ipairs({ "R", "G", "B" }) do
-        local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 20)
-        row.BackgroundTransparency = 1
-        row.Parent = box
+    -- SV square: hue bg + white->clear X (saturation) + clear->black Y (value)
+    svBg = Instance.new("TextButton")
+    svBg.Size = UDim2.new(1, 0, 0, 110)
+    svBg.Text = ""
+    svBg.AutoButtonColor = false
+    svBg.Parent = box
+    local satO = Instance.new("Frame")
+    satO.Size = UDim2.new(1, 0, 1, 0)
+    satO.BackgroundColor3 = Color3.new(1, 1, 1)
+    satO.BorderSizePixel = 0
+    satO.Parent = svBg
+    local g1 = Instance.new("UIGradient")
+    g1.Transparency = NumberSequence.new(0, 1)
+    g1.Parent = satO
+    local valO = Instance.new("Frame")
+    valO.Size = UDim2.new(1, 0, 1, 0)
+    valO.BackgroundColor3 = Color3.new(0, 0, 0)
+    valO.BorderSizePixel = 0
+    valO.Parent = svBg
+    local g2 = Instance.new("UIGradient")
+    g2.Rotation = 90
+    g2.Transparency = NumberSequence.new(1, 0)
+    g2.Parent = valO
+    svCur = Instance.new("Frame")
+    svCur.Size = UDim2.fromOffset(8, 8)
+    svCur.BackgroundTransparency = 1
+    local scs = Instance.new("UIStroke")
+    scs.Thickness = 1.5
+    scs.Color = Color3.new(1, 1, 1)
+    scs.Parent = svCur
+    round(svCur, 4)
+    svCur.Parent = svBg
 
-        local lab = Instance.new("TextLabel")
-        lab.Size = UDim2.fromOffset(14, 20)
-        lab.BackgroundTransparency = 1
-        lab.Text = ch
-        lab.Font = Enum.Font.GothamBold
-        lab.TextSize = 12
-        skin(lab, { TextColor3 = "dim" })
-        lab.Parent = row
+    -- hue strip: rainbow gradient
+    local hueBtn = Instance.new("TextButton")
+    hueBtn.Size = UDim2.new(1, 0, 0, 14)
+    hueBtn.Text = ""
+    hueBtn.AutoButtonColor = false
+    hueBtn.Parent = box
+    local seq = {}
+    for i = 0, 6 do seq[i + 1] = ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6, 1, 1)) end
+    local g3 = Instance.new("UIGradient")
+    g3.Color = ColorSequence.new(seq)
+    g3.Parent = hueBtn
+    hCur = Instance.new("Frame")
+    hCur.Size = UDim2.new(0, 4, 1, 0)
+    hCur.BackgroundColor3 = Color3.new(1, 1, 1)
+    hCur.BorderSizePixel = 0
+    hCur.Parent = hueBtn
 
-        local val = Instance.new("TextLabel")
-        val.Size = UDim2.fromOffset(30, 20)
-        val.Position = UDim2.new(1, -30, 0, 0)
-        val.BackgroundTransparency = 1
-        val.Font = Enum.Font.Gotham
-        val.TextSize = 12
-        skin(val, { TextColor3 = "text" })
-        val.Parent = row
-
-        local track = Instance.new("TextButton")
-        track.Size = UDim2.new(1, -52, 0, 10)
-        track.Position = UDim2.new(0, 20, 0.5, -5)
-        track.Text = ""
-        track.AutoButtonColor = false
-        skin(track, { BackgroundColor3 = "bg" })
-        round(track, 5)
-        track.Parent = row
-
-        local fill = Instance.new("Frame")
-        fill.Size = UDim2.new(rgb[i] / 255, 0, 1, 0)
-        skin(fill, { BackgroundColor3 = "accent" })
-        round(fill, 5)
-        fill.Parent = track
-
-        local function setV(px) -- px = absolute mouse x
-            rgb[i] = math.clamp(math.floor(
-                (px - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1) * 255 + 0.5), 0, 255)
-            fill.Size = UDim2.new(rgb[i] / 255, 0, 1, 0)
-            val.Text = tostring(rgb[i])
-            paint()
-            if cb then cb(cur()) end
-        end
-        track.InputBegan:Connect(function(input)
+    local function drag(gui, onMove) -- press-drag with release persist, mouse + touch
+        gui.InputBegan:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.MouseButton1
                 and input.UserInputType ~= Enum.UserInputType.Touch then return end
-            setV(input.Position.X)
+            onMove(input.Position)
             local dead = false
             local conn
             conn = UIS.InputChanged:Connect(function(m)
                 if not dead and (m.UserInputType == Enum.UserInputType.MouseMovement
                     or m.UserInputType == Enum.UserInputType.Touch) then
-                    setV(m.Position.X)
+                    onMove(m.Position)
                 end
             end)
             input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then
                     dead = true
                     conn:Disconnect()
-                    cfgSet(self, "ColorPicker", text, { rgb[1], rgb[2], rgb[3] })
+                    local c = cur()
+                    cfgSet(self, "ColorPicker", text, {
+                        math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5),
+                        math.floor(c.B * 255 + 0.5) })
                 end
             end)
         end)
-        val.Text = tostring(rgb[i])
-        rows[i] = { val = val, fill = fill }
     end
+    drag(svBg, function(p)
+        sat = math.clamp((p.X - svBg.AbsolutePosition.X) / math.max(svBg.AbsoluteSize.X, 1), 0, 1)
+        val = 1 - math.clamp((p.Y - svBg.AbsolutePosition.Y) / math.max(svBg.AbsoluteSize.Y, 1), 0, 1)
+        paint()
+        if cb then cb(cur()) end
+    end)
+    drag(hueBtn, function(p)
+        hue = math.clamp((p.X - hueBtn.AbsolutePosition.X) / math.max(hueBtn.AbsoluteSize.X, 1), 0, 1)
+        paint()
+        if cb then cb(cur()) end
+    end)
 
     -- restore saved {r,g,b}
     local saved = cfgGet(self, "ColorPicker", text, function(v)
@@ -1319,11 +1336,7 @@ function UI:ColorPicker(text, default, cb)
             and type(v[1]) == "number" and type(v[2]) == "number" and type(v[3]) == "number"
     end)
     if saved then
-        for i = 1, 3 do rgb[i] = math.clamp(math.floor(saved[i]), 0, 255) end
-        for i = 1, 3 do
-            rows[i].fill.Size = UDim2.new(rgb[i] / 255, 0, 1, 0)
-            rows[i].val.Text = tostring(rgb[i])
-        end
+        hue, sat, val = Color3.fromRGB(saved[1], saved[2], saved[3]):ToHSV()
         if cb then task.defer(cb, cur()) end
     end
     paint()
@@ -1331,14 +1344,12 @@ function UI:ColorPicker(text, default, cb)
     return {
         Get = function() return cur() end,
         Set = function(c)
-            rgb = { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5),
-                    math.floor(c.B * 255 + 0.5) }
-            for i = 1, 3 do
-                rows[i].fill.Size = UDim2.new(rgb[i] / 255, 0, 1, 0)
-                rows[i].val.Text = tostring(rgb[i])
-            end
+            hue, sat, val = c:ToHSV()
             paint()
-            cfgSet(self, "ColorPicker", text, rgb)
+            local co = cur()
+            cfgSet(self, "ColorPicker", text, {
+                math.floor(co.R * 255 + 0.5), math.floor(co.G * 255 + 0.5),
+                math.floor(co.B * 255 + 0.5) })
         end,
         Show = function(v) holder.Visible = v ~= false end,
     }
@@ -1481,7 +1492,7 @@ if api and api.ESP then
         if api.Overlay then -- skeleton lines switch lives with the other player visuals
             sk = pdt:Switch("Skeleton", api.Overlay.on == true, function(on) api.Overlay.Set(on) end)
         end
-        for _, flag in ipairs({ "Name", "Distance" }) do
+        for _, flag in ipairs({ "Name", "Distance", "Items" }) do
             pdt:Switch(flag, api.Details.cats[flag] == true, function(on)
                 api.Details.SetCat(flag, on)
                 detSw.Set(api.Details.on == true) -- SetCat auto-enables: keep the switch in sync
@@ -1504,39 +1515,48 @@ if api and api.ESP then
     end
     local hlsec = vis:Section("Highlight")
     enSw = hlsec:Switch("Enabled", api.ESP.on == true, function(on) api.ESP.Set(on) end)
-    local dl = hlsec:DropList("Targets", { "Killer", "Survivor", "Hook", "Generator", "Vault", "Pallet" },
+    local dl = hlsec:DropList("Targets", { "Killer", "Survivor", "Hook", "Generator", "Vault", "Pallet", "SCP" },
         function(v, on)
             api.ESP.SetCat(v, on)
             enSw.Set(api.ESP.on == true) -- SetCat auto-enables: keep the switch in sync
         end, 110)
     for cat in pairs(api.ESP.cats) do dl.Set(cat, true) end -- sync with current state
-    if api.Camera then
-        local camsec = vis:Section("Camera")
-        camsec:Switch("DBD Camera", api.Camera.on == true, function(on) api.Camera.Set(on) end)
-        camsec:Slider("Sensitivity", 2, 30, (api.Camera.sens or 0.009) * 1000, function(v)
-            api.Camera.SetSens(v)
-        end)
-    end
 end
 
 -- ---- Auto ------------------------------------------------------------------
 
 if api and api.Auto then
     local au = win:Tab("Auto")
-    au:Switch("Skill Check", api.Auto.SkillCheck == true, function(on) api.Auto.Set("SkillCheck", on) end)
-    au:Slider("Perfect Rate", 0, 100, 0, function(v)
+    local cols = au:Columns(2)
+    local sc = cols[1]:Section("Skill Check", "auto generator skill checks")
+    sc:Switch("Enabled", api.Auto.SkillCheck == true, function(on) api.Auto.Set("SkillCheck", on) end)
+    sc:Slider("Perfect Rate", 0, 100, 0, function(v)
         api.Auto.Set("PerfectRate", v)
     end)
+    local ksr = sc:Slider("King Scourge Rate", 0, 100, api.Auto.KSRate or api.Auto.PerfectRate or 0, function(v)
+        api.Auto.Set("KSRate", v)
+    end)
+    ksr.Show(getgenv().NekoKSOn == true) -- hidden until the perk is detected
+    getgenv().NekoKSChange = function(on) ksr.Show(on) end
     if api.Auto.SlashCrouch ~= nil then -- game-specific: Abysswalker slash dodge
-        au:Switch("Auto Crouch (Slash)", false, function(on) api.Auto.Set("SlashCrouch", on) end)
+        local cr = cols[2]:Section("Auto Crouch", "dodge slash attacks")
+        cr:Switch("Enabled", api.Auto.SlashCrouch == true, function(on) api.Auto.Set("SlashCrouch", on) end)
     end
     if api.Auto.AutoParry ~= nil then -- game-specific: Parrying Dagger counter
-        au:Switch("Auto Parry (Dagger)", false, function(on) api.Auto.Set("AutoParry", on) end)
-        au:Slider("Lunge Parry Lead (ms)", 0, 400, api.Auto.ParryLead or 150, function(v)
+        local pa = cols[1]:Section("Auto Parry", "Parrying Dagger counter")
+        pa:Switch("Enabled", api.Auto.AutoParry == true, function(on) api.Auto.Set("AutoParry", on) end)
+        pa:Slider("Lunge Parry Lead (ms)", 0, 400, api.Auto.ParryLead or 150, function(v)
             api.Auto.Set("ParryLead", v)
         end)
-        au:Slider("Parry Range (studs)", 4, 16, api.Auto.ParryRange or 10, function(v)
+        pa:Slider("Parry Range (studs)", 4, 16, api.Auto.ParryRange or 10, function(v)
             api.Auto.Set("ParryRange", v)
+        end)
+    end
+    if api.Aim then -- game-specific: killer M2/dash aimlock
+        local al = cols[2]:Section("Aimlock", "lock aim on M2")
+        al:Switch("Enabled", api.Aim.on == true, function(on) api.Aim.Set(on) end)
+        al:Slider("Range", 20, 150, api.Aim.radius or 80, function(v)
+            api.Aim.SetRadius(v)
         end)
     end
 end
@@ -1556,7 +1576,7 @@ if api and api.ESP then
         syncMatch()
     end)
     local colsSec = set:Section("Highlight Color")
-    for _, cat in ipairs({ "Killer", "Survivor", "Hook", "Vault", "Pallet" }) do
+    for _, cat in ipairs({ "Killer", "Survivor", "Hook", "Vault", "Pallet", "SCP" }) do
         local p = colsSec:ColorPicker(cat, api.ESP.GetColor(cat), function(c) api.ESP.SetColor(cat, c) end)
         if cat == "Killer" or cat == "Survivor" or cat == "Hook" then matched[cat] = p end
     end
@@ -1604,18 +1624,31 @@ end
 -- all four finders; generators re-list from their own folder every 2s (cheap:
 -- ~7 children) in case they change mid-match. Character finders stay live.
 local DUMMY = Instance.new("Part") -- placeholder; never parented, excludes nothing
+-- prof: per-callback ms accumulator, readable live as getgenv().NekoPerf[name] = {t,n}
+getgenv().NekoPerf = {}
+local function prof(name, fn)
+    return function(...)
+        local t0 = os.clock()
+        local r = table.pack(fn(...))
+        local p = getgenv().NekoPerf[name]
+        if p then p.t = p.t + os.clock() - t0 p.n = p.n + 1
+        else getgenv().NekoPerf[name] = { t = os.clock() - t0, n = 1 } end
+        return table.unpack(r, 1, r.n)
+    end
+end
 -- LOS exclude list, rebuilt by the Map scan: [1]=target [2]=self (mutated per
 -- check), then invisible-but-queryable trigger boxes (pallet vault zones, ...)
 -- so a visible target reads green instead of false-red
 local losExclude = { DUMMY, DUMMY }
 local propLists = {}
-local mapInst, genFolder, mapScanAt, genListAt = nil, nil, -60, -10
+local mapInst, genFolder, scpFolder, mapScanAt, genListAt, scpListAt = nil, nil, nil, -60, -10, -10
 local function ensureMap()
     local map = workspace:FindFirstChild("Map")
     local gf = map and map:FindFirstChild("new Generators")
     local now = os.clock()
     if map == mapInst and gf == genFolder and now - mapScanAt <= 60 then return end
     mapInst, genFolder, mapScanAt = map, gf, now
+    scpFolder = nil
     if not map then
         propLists = { Hook = {}, Generator = {}, Vault = {}, Pallet = {} }
         losExclude = { DUMMY, DUMMY }
@@ -1633,6 +1666,8 @@ local function ensureMap()
             triggers[#triggers + 1] = d
         elseif n == "Palletwrong" and d:IsA("Model") then
             pals[#pals + 1] = d
+        elseif n:match("^scp%d*$") and d:IsA("Model") and d:FindFirstChildOfClass("Humanoid") then
+            scpFolder = scpFolder or d.Parent -- scp npcs live under one map folder
         end
         if d:IsA("BasePart") and d.Transparency >= 1 and d.CanQuery then
             ex[#ex + 1] = d -- never a visual occluder (VaultTriggers included)
@@ -1682,6 +1717,29 @@ local function props(key)
         end
         return prune(propLists.Generator or {})
     end
+    if key == "SCP" then -- scp npcs spawn/die mid-match: re-list like gens
+        if scpFolder and os.clock() - scpListAt > 2 then
+            scpListAt = os.clock()
+            local scps = {}
+            for _, d in ipairs(scpFolder:GetChildren()) do
+                if d:IsA("Model") and d.Name:match("^scp") and d:FindFirstChildOfClass("Humanoid") then
+                    scps[#scps + 1] = d
+                end
+            end
+            propLists.SCP = scps
+        end
+        local out = {} -- unready scps drift at ~3 studs/s; aggro ones chase at ~16
+        for _, m in ipairs(propLists.SCP or {}) do
+            local hrp = m.Parent and m:FindFirstChild("HumanoidRootPart")
+            if hrp and hrp.AssemblyLinearVelocity.Magnitude > 8 then
+                out[#out + 1] = m
+            else
+                local h = m.Parent and m:FindFirstChild("NekoESP") -- went dormant: drop its box
+                if h then h:Destroy() end
+            end
+        end
+        return out
+    end
     return prune(propLists[key] or {})
 end
 
@@ -1696,6 +1754,7 @@ local COLORS = {
     Hook      = Color3.fromRGB(255, 210, 60),
     Vault     = Color3.fromRGB(190, 120, 255),
     Pallet    = Color3.fromRGB(255, 150, 50),
+    SCP       = Color3.fromRGB(255, 60, 60),
 }
 function ESP.SetColor(cat, c) ESP.custom[cat] = c end
 -- base colors follow the game's aura settings (LocalPlayer attributes);
@@ -1829,9 +1888,9 @@ rayParams.FilterType = Enum.RaycastFilterType.Exclude
 local TIPLESS = { Torso = true, UpperTorso = true, LowerTorso = true, HumanoidRootPart = true }
 local R6_LIMB = { ["Left Leg"] = true, ["Right Leg"] = true, ["Left Arm"] = true, ["Right Arm"] = true }
 
--- rescan animated Motor6D joints (rigs change as meshes/hats load); cached 0.25s.
+-- rescan animated Motor6D joints (rigs change as meshes/hats load); cached 1s.
 local function rescanMotors(char, s, now, r6)
-    if now - s.at <= 0.25 then return s.motors end
+    if now - s.at <= 1 then return s.motors end
     s.at = now
     local first = r6 and not s.warmed -- R6 bones are fixed: show all from frame one
     -- keep only motors whose Transform animates: the visible body may be a
@@ -1863,6 +1922,11 @@ end
 -- line-of-sight: blocked = red, clear = green. Invisible trigger boxes ride in
 -- the exclude list (they never occlude vision); a failed ray reads green.
 local function losColor(char, cam, s)
+    -- teammates don't need occlusion coloring: skip the raycast when we're a survivor
+    if getgenv().GameAPI.IsSurvivor()
+        and teamName(Players:GetPlayerFromCharacter(char)) == "Survivors" then
+        return LOS_GREEN
+    end
     local now = os.clock()
     if s.losCol ~= nil and now - s.losAt < 0.1 then -- 10 Hz: colors only flip on transitions
         return s.losCol
@@ -1892,18 +1956,15 @@ local function motorSegs(m, char, r6)
     if not (p0 and p1 and p0:IsDescendantOf(char) and p1:IsDescendantOf(char)) then return nil end
     local j = (p1.CFrame * m.C1).Position -- joint point on the animated child
     local b = p1.Position
-    -- R6 limbs are single rigid pieces, but their sockets sit outboard of the
-    -- limb axis: routing through the socket zigzags (crooked legs). Draw one
-    -- straight root->tip segment instead. (R15+/custom keep joint segments.)
+    -- R6 limbs: spine-end -> joint -> tip. The spine bone runs down the torso
+    -- center, so the limb needs a connector: arms hang off the top of the spine
+    -- (clavicle), legs off the bottom (pelvis); j is the real shoulder/hip.
     if r6 and R6_LIMB[p1.Name] then
-        local c1 = m.C1.Position
-        if math.abs(c1.X) > 0.2 or math.abs(c1.Z) > 0.2 then
-            local edge = p0.Size.Y / 2
-            if p1.Name:find("Leg") then edge = -edge end
-            local root = p0.CFrame * Vector3.new(0, edge, 0)
-            local tip = b - p1.CFrame.UpVector * (p1.Size.Y / 2)
-            return root, tip, nil, nil, nil, nil
-        end
+        local edge = p0.Size.Y / 2
+        if p1.Name:find("Leg") then edge = -edge end
+        local root = p0.CFrame * Vector3.new(0, edge, 0)
+        local tip = b - p1.CFrame.UpVector * (p1.Size.Y / 2)
+        return root, j, j, tip, nil, nil
     end
     if TIPLESS[p1.Name] then return p0.Position, j, j, b, nil, nil end
     return p0.Position, j, j, b, b, b + (b - j) -- extend through the far end
@@ -1998,7 +2059,7 @@ end
 
 do -- render loop; latest priority samples positions closest to the frame
     pcall(function() RunService:UnbindFromRenderStep("NekoSkel") end)
-    RunService:BindToRenderStep("NekoSkel", Enum.RenderPriority.Last.Value, function()
+    RunService:BindToRenderStep("NekoSkel", Enum.RenderPriority.Last.Value, prof("skeleton", function()
         if getgenv().NEKOHUB_ESP_RUN ~= RUN then
             pcall(function() RunService:UnbindFromRenderStep("NekoSkel") end)
             return
@@ -2031,7 +2092,7 @@ do -- render loop; latest priority samples positions closest to the frame
                 end
             end
         end
-    end)
+    end))
 end
 
 function OV.Set(on)
@@ -2115,6 +2176,10 @@ function DT.Text(inst, cat)
     if flags.Name then
         if owner then lines[#lines + 1] = owner.Name end
     end
+    if flags.Items and owner and teamName(owner) == "Survivors" then -- survivor items only (dagger, flashlight, ...)
+        local item = owner:GetAttribute("EquippedItem")
+        if item then lines[#lines + 1] = item end
+    end
     if (owner ~= nil and flags.Distance) or (owner == nil and flags["Gen Distance"]) then
         local d = distTo(inst)
         if d then lines[#lines + 1] = ("%dm"):format(d) end
@@ -2141,6 +2206,8 @@ end
 -- label text color follows generator state: lime while repaired, red while
 -- regressing, white otherwise (chars/props have no repair state)
 function DT.TextColor(inst)
+    local owner = Players:GetPlayerFromCharacter(inst)
+    if owner and teamName(owner) == "Killer" then return Color3.new(1, 0.2, 0.2) end -- killer = red
     local repairing = inst:GetAttribute("PlayersRepairingCount") or 0
     if repairing > 0 then return Color3.new(0, 1, 0) end
     if isRegressing(inst) then return Color3.new(1, 0, 0) end
@@ -2234,7 +2301,7 @@ local function dtStart() -- shared 0.25s loop; runs while either master is on
     dtRunning = true
     task.spawn(function()
         while (DT.on or DT.gen) and getgenv().NEKOHUB_ESP_RUN == RUN do
-            dtTick()
+            prof("labels", dtTick)()
             task.wait(0.25) -- text tracks movement live; ESP boxes stay on 1s
         end
         dtRunning = false
@@ -2306,7 +2373,7 @@ local AUTO: { [string]: any } = {
     ParryRange = 10, -- studs; killer reach is server-side only, tune from [NekoParry] dist logs
 }
 function AUTO.Set(name: string, val: any)
-    if name == "PerfectRate" or name == "ParryLead" or name == "ParryRange" then AUTO[name] = tonumber(val) or 0 return end
+    if name == "PerfectRate" or name == "ParryLead" or name == "ParryRange" or name == "KSRate" then AUTO[name] = tonumber(val) or 0 return end
     AUTO[name] = val == true or nil
 end
 
@@ -2327,9 +2394,9 @@ end
 do
     local TOUCH_ID = 8822
     local ACTION_PATH = "Survivor-mob.Controls.action.check"
-    -- zones (needle offset = line - goal): perfect 104°..108° pressed at once
-    -- (lands center); normal 109°..112° pressed at once (lands far-edge Good, no delay)
-    local ZN0, ZP1, ZG0, ZG1 = 104, 108, 109, 112
+    -- zones (needle offset = line - goal): perfect 104°..107° pressed at once
+    -- (lands center); normal 117°..120° pressed at once (lands far-edge Good, no delay)
+    local ZN0, ZP1, ZG0, ZG1 = 104, 107, 117, 120
 
     local prevOff: number? = nil -- last needle offset; nil = prompt hidden / goal moved
     local goal: number? = nil    -- goal rotation the current arm belongs to; nil = new prompt
@@ -2346,10 +2413,10 @@ do
     local function getPrompt(): (GuiObject?, GuiObject?, GuiObject?)
         for _, n in ipairs({ "SkillCheckPromptGui", "SkillCheckPromptGui-con" }) do
             local g = pg:FindFirstChild(n)
-            local c = g and g:FindFirstChild("Check", true)
+            local c = g and g:FindFirstChild("Check")
             if c and c:IsA("GuiObject") and c.Visible then
-                local l = c:FindFirstChild("Line", true)
-                local go = c:FindFirstChild("Goal", true)
+                local l = c:FindFirstChild("Line")
+                local go = c:FindFirstChild("Goal")
                 if l and l:IsA("GuiObject") and go and go:IsA("GuiObject") then
                     return c, l, go
                 end
@@ -2380,9 +2447,41 @@ do
 
     -- persistent loop, gated by flag; run-token kills it after re-execution
     -- (two-statement form: assign the connection before the callback can run)
+    local ksOn, ksAt = false, 0 -- killer's kings_scourge perk shrinks the skillcheck zone
+    local function ksCheck()
+        if os.clock() - ksAt < 1 then return ksOn end
+        ksAt = os.clock()
+        local on = false
+        for _, p in ipairs(Players:GetPlayers()) do
+            local c = p.Character
+            if p ~= localPlayer and teamName(p) == "Killer" and c
+                and c:GetAttribute("kings_scourge") then on = true break end
+        end
+        if on ~= ksOn then
+            ksOn = on
+            getgenv().NekoKSOn = on
+            if getgenv().NekoKSChange then pcall(getgenv().NekoKSChange, on) end
+        end
+        return ksOn
+    end
+    local function ksGenHot() -- gen being repaired is in the scourge window (>=90%)
+        local c = localPlayer.Character
+        local hrp = c and c:FindFirstChild("HumanoidRootPart")
+        if not hrp then return false end
+        local map = workspace:FindFirstChild("Map")
+        local gens = map and map:FindFirstChild("new Generators")
+        for _, g in ipairs(gens and gens:GetChildren() or workspace:GetDescendants()) do
+            local prog = g:IsA("Model") and g:GetAttribute("RepairProgress")
+            if prog and prog >= 90 and (g:GetPivot().Position - hrp.Position).Magnitude <= 15 then
+                return true
+            end
+        end
+        return false
+    end
     local conn
-    conn = RunService.RenderStepped:Connect(function()
+    conn = RunService.RenderStepped:Connect(prof("skillcheck", function()
         if getgenv().NEKOHUB_ESP_RUN ~= RUN then conn:Disconnect() return end
+        ksCheck()
         local _, ln, gl
         if AUTO.SkillCheck and getgenv().GameAPI.IsSurvivor() then _, ln, gl = getPrompt() end
         if not (ln and gl) then -- off / not survivor / prompt hidden: reset
@@ -2391,7 +2490,7 @@ do
         end
         local gr = gl.Rotation % 360
         if goal == nil then -- new prompt: roll mode once per sweep
-            perfect = math.random(100) <= (AUTO.PerfectRate or 0)
+            perfect = math.random(100) <= (ksCheck() and ksGenHot() and AUTO.KSRate or AUTO.PerfectRate or 0)
         end
         if goal == nil or math.abs(angDelta(goal, gr)) > 5 then -- new goal: re-arm
             goal, prevOff, clicked = gr, nil, false
@@ -2404,11 +2503,12 @@ do
             if off >= z0 and (off <= z1 or (prevOff ~= nil and prevOff < z0)) then
                 clicked = true
                 AUTO.lastOff = off
+                print(("[NekoSC] mode=%s off=%.1f"):format(perfect and "perfect" or "great", off))
                 trigger()
             end
         end
         prevOff = off
-    end)
+    end))
 end
 
 -- ------------------------------------------------- auto crouch vs Abysswalker slash
@@ -2456,7 +2556,7 @@ do
         Hidden      = { hold = "113255068724446", attack = { "74968262036854" }, maxHold = 0.6, speed = 27, -- attackfr shared w/ Killer
             charges = { { id = "98163597193511", maxHold = 1, range = 50 } } }, -- M2 charge→50-stud dash; ponytail: maxHold guess
         Stalker     = { hold = "117042998468241", attack = { "133963973694098" }, maxHold = 0.6, speed = 27 }, -- Stage 3 ids excluded per request
-        Masked      = { hold = "105374834496520", attack = { "111920872708571", "130593238885843", "138720291317243" }, maxHold = 0.6, speed = 27,
+        Masked      = { hold = "105374834496520", attack = { "111920872708571", "130593238885843", "138720291317243" }, maxHold = 0.6, speed = 27, liveSpeed = true,
             charges = { { id = "115244153053858", maxHold = 0.8 }, -- Cobra hold
                 { id = "117070354890871", maxHold = 1.7 },          -- Alex chainsaw rev
                 { id = "106871536134254", maxHold = 3 } } },        -- Alex saw-dash: parry when close; ponytail: maxHold guess
@@ -2555,10 +2655,21 @@ do
         -- ponytail: linear extrapolation, lag capped 0.2s and turn capped 60°; jerky
         -- flicks overshoot (the FACE_HOLD debounce below absorbs that)
         local lastLook, lastT, yawRate = nil, 0, 0
-        local function now()
-            local a = kchar:FindFirstChild("HumanoidRootPart")
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        local kHrp = kchar:FindFirstChild("HumanoidRootPart") -- parts don't change mid-track
+        local now = prof("parryprobe", function()
+            local a = kHrp and kHrp.Parent and kHrp or kchar:FindFirstChild("HumanoidRootPart")
+            kHrp = a
             local b = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
             if not (a and b) then return nil end
+            -- ponytail: 5 studs of height diff = different floor, swings can't reach
+            if math.abs(b.Position.Y - a.Position.Y) > 5 then return nil end
+            -- wall/pallet between us: the swing can't hit through it
+            rayParams.FilterDescendantsInstances = { kchar, localPlayer.Character }
+            if workspace:Raycast(a.Position + Vector3.new(0, 1.5, 0), b.Position - a.Position, rayParams) then
+                return nil
+            end
             local look = a.CFrame.LookVector * FLAT
             if look.Magnitude == 0 then return nil end
             look = look.Unit
@@ -2571,16 +2682,20 @@ do
             local turn = math.clamp(yawRate * lag, -math.rad(60), math.rad(60))
             local pos = a.Position + a.AssemblyLinearVelocity * FLAT * lag
             return (b.Position - pos) * FLAT, CFrame.Angles(0, turn, 0):VectorToWorldSpace(look)
-        end
+        end)
         local function close(range)
-            local d = now()
-            return d ~= nil and d.Magnitude <= math.min(range, 7)
+            local d, look = now()
+            if not (d and d.Magnitude <= math.min(range, 7)) then return false end
+            -- extrapolated facing: killer beside us swinging ~80° off doesn't hit (seen:
+            -- parry burned at ang 75-83 with hp unchanged). 40° rejects the bait while
+            -- ping-extrapolation still catches mid-flick turns onto us
+            return d:Dot(look) > d.Magnitude * 0.766
         end
         -- beyond the close zone: we must be ahead of the killer and within PATH_HALF of
         -- their facing line (a cone lets far/wide swings through: 6.3 studs at 41° passed
         -- 4 studs beside us and burned the dagger)
-        -- ponytail: 3.5 = guessed hitbox half-width + our body; tune from [NekoParry] logs
-        local PATH_HALF = 3.5
+        -- ponytail: 2.5 = hitbox half-width — side=3.3 confirmed a miss (hp unchanged)
+        local PATH_HALF = 2.5
         local function inPath(range)
             local d, look = now()
             if not d or d.Magnitude > range then return false end
@@ -2590,17 +2705,7 @@ do
         local function aimed(range) return close(range) or inPath(range) end
         -- auto parry: any known attack anim aimed at us inside dagger reach;
         -- Parry() yields on its anim, so it always goes through task.spawn
-        -- dist/angle of us from the killer's facing, for the logs
-        local function geo()
-            local a = kchar:FindFirstChild("HumanoidRootPart")
-            local b = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if not (a and b) then return "no root" end
-            local d, look = (b.Position - a.Position) * FLAT, a.CFrame.LookVector * FLAT
-            local ang = d.Magnitude > 0 and look.Magnitude > 0 and math.deg(math.acos(math.clamp(look.Unit:Dot(d.Unit), -1, 1))) or 0
-            local fwd = look.Magnitude > 0 and d:Dot(look.Unit) or 0
-            return ("dist=%.1f ang=%d side=%.1f"):format(d.Magnitude, ang, math.sqrt(math.max(d.Magnitude ^ 2 - fwd ^ 2, 0)))
-        end
-        local function log(what, why) print("[NekoParry]", what, "vs", kchar.Name, PARRY_IDS[id] or PARRY_HOLD_IDS[id], why, geo()) end
+        local function log(what, why) print("[NekoParry]", what, "vs", kchar.Name, PARRY_IDS[id] or PARRY_HOLD_IDS[id], why) end
         local function tryParry(why, range)
             if not (getgenv().GameAPI.IsSurvivor() and aimed(range)) then return log("skip", why .. " (not targeted)") end
             local c = parryCtrl()
@@ -2614,11 +2719,12 @@ do
         -- fires BasicAttack together), so they're a late fallback; lungehold is the
         -- early signal (plays on press, before every swing)
         -- re-checked every frame: a killer can swing facing away and turn back onto us
-        -- ponytail: 0.8s turn-back window (= the game's parry lockDuration); tune from matches
+        -- ponytail: 0.35s turn-back window — past that the hit already resolved and a
+        -- parry just burns the dagger (seen: parry fired 0.65s after "not targeted")
         if AUTO.AutoParry and PARRY_IDS[id] then
             task.spawn(function()
                 local t0 = os.clock()
-                while track.IsPlaying and AUTO.AutoParry and os.clock() - t0 < 0.8 do
+                while track.IsPlaying and AUTO.AutoParry and os.clock() - t0 < 0.35 do
                     if aimed(PARRY_RANGE) then return tryParry("attack", PARRY_RANGE) end
                     task.wait()
                 end
@@ -2637,29 +2743,37 @@ do
                 local t0 = os.clock()
                 local ov = HOLD_OV[id] or {}
                 local fire = (ov.maxHold or k.maxHold) * (kchar:GetAttribute("lungeboost") or 1)
-                local speed = ov.speed or k.speed
+                -- Masked keeps WalkSpeed = Speed*speedboost while holding (no lungeWalkSpeed);
+                -- other killers move at their fixed lungeWalkSpeed
+                local speed = ov.speed or (k.liveSpeed and kchar:GetAttribute("Speed") or nil) or k.speed
                 local range = ov.range or PARRY_RANGE -- M2 dash can strike from 50 studs out
                 local lead = (AUTO.ParryLead or 150) / 1000
-                -- anti-fake: a quick camera flick onto us mid-hold must not burn the dagger,
-                -- so beyond 7 studs facing has to hold FACE_HOLD before a wind-up parry
-                -- (inside 7 there's no time to wait: parry immediately)
-                -- ponytail: 0.15s guess; longer resists slower fakes but delays real turns
-                local FACE_HOLD, faceSince = 0.15, nil
-                local function steady(range)
-                    if close(range) then return true end
-                    return aimed(range) and faceSince ~= nil and os.clock() - faceSince >= FACE_HOLD
+                -- facing is checked before every parry with no hold time: the first
+                -- frame the killer aims at us inside reach counts (quick flicks can burn it)
+                -- ponytail: no early parry on hold start — a killer holding through the
+                -- parry window then releasing lands the hit on cooldown (fake-baiting)
+                local function steady(range) return aimed(range) end
+                local fired = false
+                local function release() -- Stopped fires the same frame; the poll is ~1 frame late
+                    if fired then return end
+                    fired = true
+                    if AUTO.AutoParry then
+                        tryParry(os.clock() - t0 >= (k.threshold or LUNGE_THRESHOLD) and "lunge release" or "quick attack", range)
+                    end
                 end
-                while track.IsPlaying and AUTO.AutoParry do
-                    if aimed(math.huge) then faceSince = faceSince or os.clock() else faceSince = nil end
-                    if steady(PARRY_RANGE) then return tryParry("close wind-up", PARRY_RANGE) end
+                local stop = track.Stopped:Connect(release)
+                while track.IsPlaying and AUTO.AutoParry and not fired do
                     local left = math.max(fire - (os.clock() - t0), 0)
                     local reach = range + speed * left
-                    if left <= lead and steady(reach) then return tryParry("lunge", reach) end
+                    if left <= lead and steady(reach) then
+                        fired = true
+                        stop:Disconnect()
+                        return tryParry("lunge", reach)
+                    end
                     task.wait()
                 end
-                if AUTO.AutoParry then
-                    tryParry(os.clock() - t0 >= (k.threshold or LUNGE_THRESHOLD) and "lunge release" or "quick attack", range)
-                end
+                stop:Disconnect()
+                release()
             end)
         end
         if not (AUTO.SlashCrouch and anim.AnimationId:find(SLASH_ID, 1, true)) then return end
@@ -2679,6 +2793,7 @@ do
     task.spawn(function() -- hook killer animators; re-scan picks up respawns
         while getgenv().NEKOHUB_ESP_RUN == RUN do
             task.wait(1) -- first: GameAPI is assigned below this block
+            prof("rescan", function()
             for _, kchar in ipairs(getgenv().GameAPI.Targets.Killer()) do
                 local hum = kchar:FindFirstChildOfClass("Humanoid")
                 local an = hum and hum:FindFirstChildOfClass("Animator")
@@ -2711,87 +2826,88 @@ do
                     parryCtrl()
                 end
             end
+            end)()
         end
     end)
 end
 
--- DBD-style custom camera: damped free-look orbit, trailing pivot, right shoulder
-local CAM = { on = false, FOV = 80, sens = 0.009 }
-local camConn, camInput, camSaved
-local tYaw, tPitch, cYaw, cPitch, cPivot -- target + smoothed look + smoothed pivot
-local CAM_DIST, CAM_UP, CAM_SIDE = 7, 2.2, 1.75
-local CAM_POS_S, CAM_ROT_S, CAM_MOVE_SLOW = 10, 18, 0.5
-local function camEnable(char)
-    local cam, hrp = workspace.CurrentCamera, char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    if camInput then camInput:Disconnect() camInput = nil end -- respawn re-entry
-    local look = cam.CFrame.LookVector
-    tYaw, cYaw = math.atan2(-look.X, -look.Z), math.atan2(-look.X, -look.Z)
-    tPitch, cPitch = -0.12, -0.12
-    cPivot = hrp.Position + Vector3.new(0, CAM_UP, 0)
-    -- remember prior state so Set(false) restores exactly what the game had
-    -- (FOV excluded: the game rewrites it every frame, ours only holds while enabled)
-    camSaved = { cam.CameraType, cam.CameraSubject,
-        localPlayer.CameraMinZoomDistance, localPlayer.CameraMaxZoomDistance, UIS.MouseBehavior }
-    cam.CameraType = Enum.CameraType.Scriptable
-    camInput = UIS.InputChanged:Connect(function(i, gpe)
-        if gpe then return end
-        -- slower sensitivity while the character is moving (DBD feel)
-        local sens = CAM.sens
-        if hrp and hrp.Parent and hrp.AssemblyLinearVelocity.Magnitude > 2 then sens *= CAM_MOVE_SLOW end
-        if i.UserInputType == Enum.UserInputType.MouseMovement then
-            tYaw -= i.Delta.X * sens
-            tPitch = math.clamp(tPitch - i.Delta.Y * sens, -1.2, 1.2)
-        elseif i.UserInputType == Enum.UserInputType.Touch
-            and i.UserInputState == Enum.UserInputState.Change then
-            tYaw -= i.Delta.X * sens * 0.7
-            tPitch = math.clamp(tPitch - i.Delta.Y * sens * 0.7, -1.2, 1.2)
-        end
-    end)
-    if UIS.MouseEnabled then UIS.MouseBehavior = Enum.MouseBehavior.LockCenter end
-    camConn = RunService:BindToRenderStep("nekoCam", Enum.RenderPriority.Camera.Value, function(dt)
-        local hrp2 = char and char.Parent and char:FindFirstChild("HumanoidRootPart")
-        if not hrp2 then return end
-        local a = math.min(1, dt * CAM_POS_S)
-        cPivot = cPivot:Lerp(hrp2.Position + Vector3.new(0, CAM_UP, 0), a)
-        local b = math.min(1, dt * CAM_ROT_S)
-        cYaw += (tYaw - cYaw) * b
-        cPitch += (tPitch - cPitch) * b
-        cam.CFrame = CFrame.new(cPivot) * CFrame.Angles(0, cYaw, 0) * CFrame.Angles(cPitch, 0, 0)
-            * CFrame.new(CAM_SIDE, 0, CAM_DIST)
-        cam.FieldOfView = CAM.FOV
-    end)
-end
-function CAM.Set(on)
-    on = on ~= false
-    if on == CAM.on then return end
-    CAM.on = on
-    if camConn then RunService:UnbindFromRenderStep("nekoCam") camConn = nil end
-    if camInput then camInput:Disconnect() camInput = nil end
-    local cam = workspace.CurrentCamera
-    if on then
-        camEnable(localPlayer.Character)
-    else
-        local s = camSaved
-        if s then
-            cam.CameraSubject = s[2]
-            cam.CameraType = s[1]
-            localPlayer.CameraMaxZoomDistance = s[4]
-            localPlayer.CameraMinZoomDistance = s[3]
-            if UIS.MouseEnabled then UIS.MouseBehavior = s[5] end
-            camSaved = nil
-        else
-            cam.CameraType = Enum.CameraType.Custom
-            local hum = localPlayer.Character and localPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if hum then cam.CameraSubject = hum end
-            localPlayer.CameraMaxZoomDistance = 400
-            localPlayer.CameraMinZoomDistance = 0.5
-            if UIS.MouseEnabled then UIS.MouseBehavior = Enum.MouseBehavior.Default end
+-- Aimlock: while enabled, snap camera + character aim at the nearest
+-- LOS-visible survivor (for killer M2/dash aim); toggle off to release
+local AIM = { on = false, radius = 80 }
+local aimRp = RaycastParams.new()
+aimRp.FilterType = Enum.RaycastFilterType.Exclude
+local function aimTarget(look, myPos)
+    local best, bd, bn
+    for _, p in ipairs(Players:GetPlayers()) do
+        local c = p ~= localPlayer and teamName(p) == "Survivors" and p.Character
+        local r = c and not (c:GetAttribute("Knocked") or c:GetAttribute("IsHooked")
+            or c:GetAttribute("IsCarried") or c:GetAttribute("Iframes"))
+            and c:FindFirstChild("HumanoidRootPart")
+        if r then
+            local dir = r.Position - myPos
+            local d = dir.Magnitude
+            if d <= AIM.radius and d > 0 and look:Dot(dir / d) > 0 and (not bd or d < bd) then
+                aimRp.FilterDescendantsInstances = { localPlayer.Character, c }
+                if not workspace:Raycast(myPos, r.Position - myPos, aimRp) then
+                    -- lead the shot: target pos + its velocity × dash travel time
+                    local lead = math.clamp(d / 55, 0.15, 0.9) -- ponytail: M2 dash speed guess
+                    best, bd, bn = r.Position + r.AssemblyLinearVelocity * lead, d, p.Name
+                end
+            end
         end
     end
+    return best, bn
 end
-function CAM.SetSens(v) CAM.sens = (tonumber(v) or 9) / 1000 end
-localPlayer.CharacterAdded:Connect(function(char) if CAM.on then camEnable(char) end end)
+function AIM.Set(on) AIM.on = on ~= false end
+function AIM.SetRadius(v) AIM.radius = tonumber(v) or 80 end
+-- lock only while the killer's own charge anim plays (Hidden M2)
+local AIM_IDS = { ["98163597193511"] = true }
+local aimUntil, aimLogAt
+local function hookAim(char)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local an = hum and hum:FindFirstChildOfClass("Animator")
+    if an then
+        an.AnimationPlayed:Connect(function(track)
+            if getgenv().NEKOHUB_ESP_RUN ~= RUN then return end
+            local id = track.Animation and track.Animation.AnimationId:match("%d+$")
+            if AIM_IDS[id] then aimUntil = os.clock() + 1 print('[NekoAim] M2 track set') end
+        end)
+    end
+end
+hookAim(localPlayer.Character)
+localPlayer.CharacterAdded:Connect(hookAim)
+
+-- kill a stale status HUD from older runs
+local oldStatus = pg:FindFirstChild("NekoStatus")
+if oldStatus then oldStatus:Destroy() end
+-- unbend a flashlight weld left rotated by the removed flash-aim feature
+local fw = localPlayer.Character and localPlayer.Character:FindFirstChild("Flashlight")
+fw = fw and fw:FindFirstChildWhichIsA("Weld", true)
+if fw then fw.C1 = CFrame.new() end
+
+local aimBind = "nekoAim" .. RUN -- unique per run: old runs can only unbind themselves
+RunService:BindToRenderStep(aimBind, Enum.RenderPriority.Camera.Value + 1, prof("aimlock", function()
+    getgenv()._aimBeat = (getgenv()._aimBeat or 0) + 1
+    if getgenv().NEKOHUB_ESP_RUN ~= RUN then return RunService:UnbindFromRenderStep(aimBind) end
+    local inWin = aimUntil and os.clock() < aimUntil
+    if not (AIM.on and inWin) then
+        if inWin and not AIM.on then print('[NekoAim] window open but off') end
+        return
+    end
+    local char = localPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then print('[NekoAim] window open but no hrp') return end
+    local cam = workspace.CurrentCamera
+    local t, tn = aimTarget(hrp.CFrame.LookVector, hrp.Position + Vector3.new(0, 1.5, 0))
+    if not t then
+        if not aimLogAt or os.clock() - aimLogAt > 1 then aimLogAt = os.clock() print('[NekoAim] lock on but no LOS target') end
+        return
+    end
+    if not aimLogAt or os.clock() - aimLogAt > 0.8 then aimLogAt = os.clock() print('[NekoAim] locking ->', tn) end
+    local cam = workspace.CurrentCamera
+    cam.CFrame = CFrame.new(cam.CFrame.Position, t)
+    hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(t.X, hrp.Position.Y, t.Z))
+end))
 
 getgenv().GameAPI = {
     IsLobby    = function(p) return teamName(p) == "Spectator" end,
@@ -2809,12 +2925,13 @@ getgenv().GameAPI = {
         Vault     = function() return props("Vault") end,
         -- pallets are vaultable until broken (broken pallets get destroyed -> auto-pruned)
         Pallet    = function() return props("Pallet") end,
+        SCP       = function() return props("SCP") end,
     },
     ESP = ESP,
     Overlay = OV,
     Auto = AUTO,
     Details = DT,
-    Camera = CAM,
+    Aim = AIM,
 }
 
 getgenv().NekoHubConfig = {
