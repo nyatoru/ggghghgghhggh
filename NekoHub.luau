@@ -2554,7 +2554,7 @@ do
         Killer      = { hold = "129784271201071", attack = { "132817836308238", "82666958311998" }, maxHold = 0.6, speed = 27 }, -- attackfr = Frenzy
         Cure        = { hold = "135002183282873", attack = { "121216847022485" }, maxHold = 0.6, speed = 27, threshold = 0.2 }, -- no flask
         Hidden      = { hold = "113255068724446", attack = { "74968262036854" }, maxHold = 0.6, speed = 27, -- attackfr shared w/ Killer
-            charges = { { id = "98163597193511", maxHold = 1, range = 50 } } }, -- M2 charge→50-stud dash; ponytail: maxHold guess
+            charges = { { id = "98163597193511", maxHold = 0.55, range = 50 } } }, -- M2: 0.55s charge → 50-stud dash
         Stalker     = { hold = "117042998468241", attack = { "133963973694098" }, maxHold = 0.6, speed = 27 }, -- Stage 3 ids excluded per request
         Masked      = { hold = "105374834496520", attack = { "111920872708571", "130593238885843", "138720291317243" }, maxHold = 0.6, speed = 27, liveSpeed = true,
             charges = { { id = "115244153053858", maxHold = 0.8 }, -- Cobra hold
@@ -2748,6 +2748,19 @@ do
                 local speed = ov.speed or (k.liveSpeed and kchar:GetAttribute("Speed") or nil) or k.speed
                 local range = ov.range or PARRY_RANGE -- M2 dash can strike from 50 studs out
                 local lead = (AUTO.ParryLead or 150) / 1000
+                -- dash charge (Hidden M2): the hit lands during the dash (~0.55-1.1s
+                -- after cast), not at the charge end. Wait out the charge, then fire
+                -- the first frame the dash is aimed at us in range. No IsPlaying gate:
+                -- the charge track can end while the dash still travels
+                -- ponytail: 2.2s watch cap from the reference impl
+                if ov.range then
+                    task.wait(fire)
+                    while AUTO.AutoParry and os.clock() - t0 < 2.2 do
+                        if aimed(range) then return tryParry("dash", range) end
+                        task.wait()
+                    end
+                    return log("skip", "dash (never aimed at us)")
+                end
                 -- facing is checked before every parry with no hold time: the first
                 -- frame the killer aims at us inside reach counts (quick flicks can burn it)
                 -- ponytail: no early parry on hold start — a killer holding through the
