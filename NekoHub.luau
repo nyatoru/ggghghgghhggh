@@ -1545,12 +1545,17 @@ if api and api.Auto then
     if api.Auto.AutoParry ~= nil then -- game-specific: Parrying Dagger counter
         local pa = cols[1]:Section("Auto Parry", "Parrying Dagger counter")
         pa:Switch("Enabled", api.Auto.AutoParry == true, function(on) api.Auto.Set("AutoParry", on) end)
-        pa:Slider("Lunge Parry Lead (ms)", 0, 400, api.Auto.ParryLead or 150, function(v)
-            api.Auto.Set("ParryLead", v)
-        end)
         pa:Slider("Parry Range (studs)", 4, 16, api.Auto.ParryRange or 10, function(v)
             api.Auto.Set("ParryRange", v)
         end)
+    end
+    if api.Auto.SilentGun ~= nil then -- game-specific: Twist of Fate aim
+        local sg = cols[2]:Section("Silent Gun", "Twist of Fate shots hit the target nearest your crosshair")
+        sg:Switch("Enabled", api.Auto.SilentGun == true, function(on) api.Auto.Set("SilentGun", on) end)
+        sg:Slider("FOV (px)", 20, 600, api.Auto.GunFov or 150, function(v) api.Auto.Set("GunFov", v) end)
+        sg:Switch("Show FOV Circle", api.Auto.GunCircle == true, function(on) api.Auto.Set("GunCircle", on) end)
+        local gt = sg:DropList("Targets", { "Killer", "Survivor" }, function(v, on) api.Auto.Set("Gun" .. v, on) end, 68)
+        for _, c in ipairs({ "Killer", "Survivor" }) do gt.Set(c, api.Auto["Gun" .. c] == true) end
     end
     if api.Aim then -- game-specific: killer M2/dash aimlock
         local al = cols[2]:Section("Aimlock", "lock aim on M2")
@@ -1630,9 +1635,10 @@ local function prof(name, fn)
     return function(...)
         local t0 = os.clock()
         local r = table.pack(fn(...))
+        local dt = os.clock() - t0
         local p = getgenv().NekoPerf[name]
-        if p then p.t = p.t + os.clock() - t0 p.n = p.n + 1
-        else getgenv().NekoPerf[name] = { t = os.clock() - t0, n = 1 } end
+        if p then p.t, p.n, p.max = p.t + dt, p.n + 1, math.max(p.max, dt)
+        else getgenv().NekoPerf[name] = { t = dt, n = 1, max = dt } end
         return table.unpack(r, 1, r.n)
     end
 end
@@ -1835,7 +1841,7 @@ function ESP.Set(on)
     if on then
         task.spawn(function()
             while ESP.on and getgenv().NEKOHUB_ESP_RUN == RUN do
-                espTick()
+                prof("highlight", espTick)()
                 task.wait(1)
             end
         end)
@@ -2370,10 +2376,13 @@ end
 local AUTO: { [string]: any } = {
     SkillCheck = false, PerfectRate = 0, SlashCrouch = false, AutoParry = false,
     ParryLead = 150, -- ms before a held lunge's forced swing (maxHold) to parry
+    ParryLeadAuto = true, -- lunge lead from the measured parry window instead of ParryLead
+    SilentGun = false,
+    GunFov = 150, GunCircle = true, GunKiller = true, -- Silent Gun: FOV radius (px), draw FOV ring, target cats (GunSurvivor)
     ParryRange = 10, -- studs; killer reach is server-side only, tune from [NekoParry] dist logs
 }
 function AUTO.Set(name: string, val: any)
-    if name == "PerfectRate" or name == "ParryLead" or name == "ParryRange" or name == "KSRate" then AUTO[name] = tonumber(val) or 0 return end
+    if name == "PerfectRate" or name == "ParryLead" or name == "ParryRange" or name == "KSRate" or name == "GunFov" then AUTO[name] = tonumber(val) or 0 return end
     AUTO[name] = val == true or nil
 end
 
@@ -2554,7 +2563,7 @@ do
         Killer      = { hold = "129784271201071", attack = { "132817836308238", "82666958311998" }, maxHold = 0.6, speed = 27 }, -- attackfr = Frenzy
         Cure        = { hold = "135002183282873", attack = { "121216847022485" }, maxHold = 0.6, speed = 27, threshold = 0.2 }, -- no flask
         Hidden      = { hold = "113255068724446", attack = { "74968262036854" }, maxHold = 0.6, speed = 27, -- attackfr shared w/ Killer
-            charges = { { id = "98163597193511", maxHold = 0.55, range = 50 } } }, -- M2: 0.55s charge → 50-stud dash
+            charges = { { id = "98163597193511", maxHold = 0.55, range = 50, speed = 90 } } }, -- M2: 0.55s charge → 50-stud dash; ponytail: speed guess (50 studs over ~0.55s)
         Stalker     = { hold = "117042998468241", attack = { "133963973694098" }, maxHold = 0.6, speed = 27 }, -- Stage 3 ids excluded per request
         Masked      = { hold = "105374834496520", attack = { "111920872708571", "130593238885843", "138720291317243" }, maxHold = 0.6, speed = 27, liveSpeed = true,
             charges = { { id = "115244153053858", maxHold = 0.8 }, -- Cobra hold
@@ -2580,13 +2589,33 @@ do
         if pCtrl and pDagger == dg then return pCtrl end
         pCtrl, pDagger = nil, dg
         for _, t in ipairs(getgc and getgc(true) or {}) do
-            if type(t) == "table" and rawget(t, "parryEvent") ~= nil and rawget(t, "tool") == dg then
+            -- tool is the dagger's inner handle (Left Arm/Parry Dagger), not the model
+            local tool = type(t) == "table" and rawget(t, "tool")
+            if type(t) == "table" and rawget(t, "parryEvent") ~= nil
+                and (tool == dg or (typeof(tool) == "Instance" and tool:IsDescendantOf(dg))) then
                 pCtrl = t
                 break
             end
         end
         return pCtrl
     end
+
+    -- server parry window (our Parry attribute's true span); seeded with ParryClient's 0.8s lockDuration
+    local parryWindow = 0.8
+    local function watchParry(c)
+        local on
+        c:GetAttributeChangedSignal("Parry"):Connect(function()
+            if getgenv().NEKOHUB_ESP_RUN ~= RUN then return end
+            if c:GetAttribute("Parry") then on = os.clock()
+            elseif on then
+                parryWindow = os.clock() - on
+                print(("[NekoParry] window %.3fs"):format(parryWindow))
+                on = nil
+            end
+        end)
+    end
+    if localPlayer.Character then watchParry(localPlayer.Character) end
+    localPlayer.CharacterAdded:Connect(watchParry)
 
     -- the game's SurvivorAnimationsController (owns crouchButton); cached per button
     local ctrl, ctrlBtn
@@ -2721,7 +2750,10 @@ do
         -- re-checked every frame: a killer can swing facing away and turn back onto us
         -- ponytail: 0.35s turn-back window — past that the hit already resolved and a
         -- parry just burns the dagger (seen: parry fired 0.65s after "not targeted")
-        if AUTO.AutoParry and PARRY_IDS[id] then
+        -- no dagger on us: nothing to parry with, skip the per-frame watches
+        local armed = AUTO.AutoParry and localPlayer.Character
+            and localPlayer.Character:FindFirstChild("Parrying Dagger") ~= nil
+        if armed and PARRY_IDS[id] then
             task.spawn(function()
                 local t0 = os.clock()
                 while track.IsPlaying and AUTO.AutoParry and os.clock() - t0 < 0.35 do
@@ -2738,47 +2770,69 @@ do
         -- first -> parry at release (held >= lungeThreshold = the game's lunge)
         -- ponytail: t0 is when the anim reaches us, not the killer's press; ParryLead absorbs it
         local k = KILLERS[PARRY_HOLD_IDS[id]]
-        if AUTO.AutoParry and k then
+        if armed and k then
+            local ov = HOLD_OV[id] or {}
             task.spawn(function()
                 local t0 = os.clock()
-                local ov = HOLD_OV[id] or {}
+                -- cache miss = full GC scan: pay it at wind-up start, not on the parry frame
+                -- (throttled like the rescan warm so a missing controller isn't re-scanned per swing)
+                if not (pCtrl and pDagger == localPlayer.Character:FindFirstChild("Parrying Dagger"))
+                    and t0 - parryWarmAt > 5 then
+                    parryWarmAt = t0
+                    parryCtrl()
+                end
                 local fire = (ov.maxHold or k.maxHold) * (kchar:GetAttribute("lungeboost") or 1)
                 -- Masked keeps WalkSpeed = Speed*speedboost while holding (no lungeWalkSpeed);
                 -- other killers move at their fixed lungeWalkSpeed
                 local speed = ov.speed or (k.liveSpeed and kchar:GetAttribute("Speed") or nil) or k.speed
-                local range = ov.range or PARRY_RANGE -- M2 dash can strike from 50 studs out
-                local lead = (AUTO.ParryLead or 150) / 1000
-                -- dash charge (Hidden M2): the hit lands during the dash (~0.55-1.1s
-                -- after cast), not at the charge end. Wait out the charge, then fire
-                -- the first frame the dash is aimed at us in range. No IsPlaying gate:
-                -- the charge track can end while the dash still travels
+                local range = PARRY_RANGE
+                -- our parry lands ~one RTT after we fire (t0 is already late by the anim's trip to us),
+                -- so it must go out ParryLead + RTT before the forced swing
+                local lead = (AUTO.ParryLead or 150) / 1000 + math.min(localPlayer:GetNetworkPing(), 0.2)
+                -- lunge lead: auto = the parry window still covers the forced swing when it lands
+                local lungeLead = AUTO.ParryLeadAuto and parryWindow - 0.15 + math.min(localPlayer:GetNetworkPing(), 0.2) or lead
+                -- dash charge (Hidden M2): the dash starts at the charge end and closes
+                -- at `speed`, so the hit reaches PARRY_RANGE + speed * (time dashing).
+                -- Fire once that reach, projected ParryLead ahead, covers us: point-blank
+                -- fires ParryLead before the charge ends, far dashes wait for travel.
+                -- No IsPlaying gate: the charge track can end while the dash still travels
                 -- ponytail: 2.2s watch cap from the reference impl
                 if ov.range then
-                    task.wait(fire)
                     while AUTO.AutoParry and os.clock() - t0 < 2.2 do
-                        if aimed(range) then return tryParry("dash", range) end
+                        local ahead = os.clock() - t0 - fire + lead
+                        local reach = math.min(range + speed * ahead, ov.range)
+                        if ahead >= 0 and aimed(reach) then return tryParry("dash", reach) end
                         task.wait()
                     end
                     return log("skip", "dash (never aimed at us)")
                 end
                 -- facing is checked before every parry with no hold time: the first
                 -- frame the killer aims at us inside reach counts (quick flicks can burn it)
-                -- ponytail: no early parry on hold start — a killer holding through the
-                -- parry window then releasing lands the hit on cooldown (fake-baiting)
+                -- attack: a quick M1 only lands if he's already in swing range, so parry the
+                -- first frame of a normal hold he's aimed at us inside it. Safe vs hold-baits:
+                -- the server parry window (~0.81s, logged as [NekoParry] window) outlasts
+                -- maxHold. Charges (Masked Cobra/Alex rev) hold longer, so they skip this
+                local quick = id == k.hold
                 local function steady(range) return aimed(range) end
                 local fired = false
                 local function release() -- Stopped fires the same frame; the poll is ~1 frame late
                     if fired then return end
                     fired = true
                     if AUTO.AutoParry then
-                        tryParry(os.clock() - t0 >= (k.threshold or LUNGE_THRESHOLD) and "lunge release" or "quick attack", range)
+                        local held = os.clock() - t0
+                        tryParry((held >= (k.threshold or LUNGE_THRESHOLD) and "lunge release" or "quick attack") .. (" held %.2fs"):format(held), range)
                     end
                 end
                 local stop = track.Stopped:Connect(release)
                 while track.IsPlaying and AUTO.AutoParry and not fired do
+                    if quick and steady(range) then
+                        fired = true
+                        stop:Disconnect()
+                        return tryParry("attack (hold)", range)
+                    end
                     local left = math.max(fire - (os.clock() - t0), 0)
                     local reach = range + speed * left
-                    if left <= lead and steady(reach) then
+                    if left <= lungeLead and steady(reach) then
                         fired = true
                         stop:Disconnect()
                         return tryParry("lunge", reach)
@@ -2876,41 +2930,14 @@ function AIM.SetRadius(v) AIM.radius = tonumber(v) or 80 end
 -- lock only while the killer's own charge anim plays (Hidden M2)
 local AIM_IDS = { ["98163597193511"] = true }
 local aimUntil, aimLogAt
-local function hookAim(char)
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local an = hum and hum:FindFirstChildOfClass("Animator")
-    if an then
-        an.AnimationPlayed:Connect(function(track)
-            if getgenv().NEKOHUB_ESP_RUN ~= RUN then return end
-            local id = track.Animation and track.Animation.AnimationId:match("%d+$")
-            if AIM_IDS[id] then aimUntil = os.clock() + 1 print('[NekoAim] M2 track set') end
-        end)
-    end
-end
-hookAim(localPlayer.Character)
-localPlayer.CharacterAdded:Connect(hookAim)
-
--- kill a stale status HUD from older runs
-local oldStatus = pg:FindFirstChild("NekoStatus")
-if oldStatus then oldStatus:Destroy() end
--- unbend a flashlight weld left rotated by the removed flash-aim feature
-local fw = localPlayer.Character and localPlayer.Character:FindFirstChild("Flashlight")
-fw = fw and fw:FindFirstChildWhichIsA("Weld", true)
-if fw then fw.C1 = CFrame.new() end
-
 local aimBind = "nekoAim" .. RUN -- unique per run: old runs can only unbind themselves
-RunService:BindToRenderStep(aimBind, Enum.RenderPriority.Camera.Value + 1, prof("aimlock", function()
-    getgenv()._aimBeat = (getgenv()._aimBeat or 0) + 1
-    if getgenv().NEKOHUB_ESP_RUN ~= RUN then return RunService:UnbindFromRenderStep(aimBind) end
-    local inWin = aimUntil and os.clock() < aimUntil
-    if not (AIM.on and inWin) then
-        if inWin and not AIM.on then print('[NekoAim] window open but off') end
-        return
+local function aimStep()
+    if getgenv().NEKOHUB_ESP_RUN ~= RUN or not AIM.on or os.clock() >= aimUntil then
+        return RunService:UnbindFromRenderStep(aimBind) -- window over: no per-frame cost
     end
     local char = localPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then print('[NekoAim] window open but no hrp') return end
-    local cam = workspace.CurrentCamera
+    if not hrp then return end
     local t, tn = aimTarget(hrp.CFrame.LookVector, hrp.Position + Vector3.new(0, 1.5, 0))
     if not t then
         if not aimLogAt or os.clock() - aimLogAt > 1 then aimLogAt = os.clock() print('[NekoAim] lock on but no LOS target') end
@@ -2920,7 +2947,235 @@ RunService:BindToRenderStep(aimBind, Enum.RenderPriority.Camera.Value + 1, prof(
     local cam = workspace.CurrentCamera
     cam.CFrame = CFrame.new(cam.CFrame.Position, t)
     hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(t.X, hrp.Position.Y, t.Z))
-end))
+end
+-- bound only while our own Hidden M2 anim plays: non-Hidden players never run it
+local function hookAim(char)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local an = hum and hum:FindFirstChildOfClass("Animator")
+    if an then
+        an.AnimationPlayed:Connect(function(track)
+            if getgenv().NEKOHUB_ESP_RUN ~= RUN or not AIM.on then return end
+            local id = track.Animation and track.Animation.AnimationId:match("%d+$")
+            if AIM_IDS[id] then
+                aimUntil = os.clock() + 1
+                pcall(RunService.UnbindFromRenderStep, RunService, aimBind)
+                RunService:BindToRenderStep(aimBind, Enum.RenderPriority.Camera.Value + 1, prof("aimlock", aimStep))
+            end
+        end)
+    end
+end
+hookAim(localPlayer.Character)
+localPlayer.CharacterAdded:Connect(hookAim)
+
+-- Silent Gun (Twist of Fate): the gun sends only the camera look direction and the
+-- server shoots from its own origin, so rewrite that direction to hit the LOS-visible
+-- target (selected cats) closest to screen center inside the FOV ring. Origin (HRP-local)
+-- and bullet speed self-calibrate from the
+-- server's VisualizeBullet echo of our own shots
+-- ponytail: lead = windowed velocity + turn rate, intercept-solved over (echo delay + interp + travel), clipped at walls; zig-zags still miss
+local tofRemotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Items"):WaitForChild("Twist of Fate")
+local gunOffset, gunSpeed = Vector3.new(0, 1.4, 0), 200 -- first shot guess until an echo calibrates it
+-- our view of other players lags the server by (fire -> server fires -> echo back) + interpolation,
+-- so lead time = measured echo delay + GUN_INTERP + bullet travel
+-- ponytail: GUN_INTERP is a fixed guess of Roblox's replication interpolation buffer
+local GUN_INTERP = 0.05
+local gunDelay, gunShot = 0.25, nil -- smoothed FireServer->echo seconds (seed from live 0.24s), last redirected shot
+local gunRp = RaycastParams.new()
+gunRp.FilterType = Enum.RaycastFilterType.Exclude
+-- the server's bullet passes through fully transparent parts (invisible barriers), so LOS skips them
+local function gunClear(from, to, char)
+    local ex = { localPlayer.Character, char }
+    for _ = 1, 4 do
+        gunRp.FilterDescendantsInstances = ex
+        local hit = workspace:Raycast(from, to - from, gunRp)
+        if not hit then return true end
+        if hit.Instance.Transparency < 1 then return false end
+        table.insert(ex, hit.Instance)
+    end
+    return false
+end
+-- other players' AssemblyLinearVelocity doesn't replicate (reads 0), so estimate velocity from
+-- replicated positions over the last GUN_WINDOW seconds (per-frame deltas are packet-jittery);
+-- horizontal only (jump arcs would throw the lead), capped so vault/teleport snaps don't spike it
+local GUN_WINDOW, GUN_MAXSPEED = 0.2, 35
+local gunHist = setmetatable({}, { __mode = "k" }) -- HRP -> { {t, p}, ... } oldest first
+local function trackVel()
+    local api = getgenv().GameAPI
+    if not api then return end
+    local now = os.clock()
+    for _, cat in ipairs({ "Killer", "Survivor" }) do
+        if AUTO["Gun" .. cat] then
+            for _, char in ipairs(api.Targets[cat]()) do
+                local r = char ~= localPlayer.Character and char:FindFirstChild("HumanoidRootPart")
+                if r then
+                    local h = gunHist[r] or {}
+                    gunHist[r] = h
+                    table.insert(h, { now, r.Position })
+                    while #h > 2 and now - h[2][1] >= GUN_WINDOW do table.remove(h, 1) end
+                end
+            end
+        end
+    end
+end
+-- velocity over the window + turn rate from how the heading changed between its two halves
+local function gunMotion(r)
+    local h = gunHist[r]
+    if not h or #h < 3 then return Vector3.zero, 0 end
+    local a, b = h[1], h[#h]
+    local span = b[1] - a[1]
+    if span < 0.05 then return Vector3.zero, 0 end
+    local flat = Vector3.new(1, 0, 1)
+    local v = (b[2] - a[2]) * flat / span
+    if v.Magnitude > GUN_MAXSPEED then v = v.Unit * GUN_MAXSPEED end
+    local m = h[1]
+    for _, s in ipairs(h) do if s[1] - a[1] >= span / 2 then m = s break end end
+    local v1, v2 = (m[2] - a[2]) * flat / math.max(m[1] - a[1], 1e-3), (b[2] - m[2]) * flat / math.max(b[1] - m[1], 1e-3)
+    if v1.Magnitude < 4 or v2.Magnitude < 4 then return v, 0 end -- too slow for a reliable heading
+    local turn = math.asin(math.clamp(v1.Unit:Cross(v2.Unit).Y, -1, 1)) / (span / 2)
+    return v, math.clamp(turn, -3, 3)
+end
+-- where the target is after t seconds, following its current turn (capped at a quarter circle)
+local function gunPath(p, v, turn, t)
+    if math.abs(turn) < 0.05 then return p + v * t end
+    local steps = math.max(1, math.ceil(t / 0.05))
+    local dt, rot = t / steps, CFrame.Angles(0, math.clamp(turn * t, -math.pi / 2, math.pi / 2) / steps, 0)
+    for _ = 1, steps do
+        p = p + v * dt
+        v = rot:VectorToWorldSpace(v)
+    end
+    return p
+end
+local function gunAim(dir)
+    if getgenv().NEKOHUB_ESP_RUN ~= RUN then return nil end
+    gunShot = { t = os.clock() } -- every Fire measures the echo delay, aimed or not
+    if not AUTO.SilentGun then return nil end
+    local hrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    local cam = workspace.CurrentCamera
+    local center = cam.ViewportSize / 2
+    local origin = hrp.CFrame:PointToWorldSpace(gunOffset)
+    local lead = gunDelay + GUN_INTERP
+    local best, bs, bn, bd, bv, bc, bt
+    for _, cat in ipairs({ "Killer", "Survivor" }) do
+        if AUTO["Gun" .. cat] then
+            for _, char in ipairs(getgenv().GameAPI.Targets[cat]()) do
+                local r = char ~= localPlayer.Character and char:FindFirstChild("HumanoidRootPart")
+                if r then
+                    local sp, onScreen = cam:WorldToViewportPoint(r.Position)
+                    local s = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                    if onScreen and s <= AUTO.GunFov and (not bs or s < bs) then
+                        if gunClear(origin, r.Position, char) then
+                            local d = (r.Position - origin).Magnitude
+                            local v, turn = gunMotion(r)
+                            -- intercept: travel time depends on where he'll be, not where he is
+                            -- (running away needs more lead, toward us less); converges in a few passes
+                            local t = lead + d / gunSpeed
+                            local aimAt
+                            for _ = 1, 4 do
+                                aimAt = gunPath(r.Position, v, turn, t)
+                                t = lead + (aimAt - origin).Magnitude / gunSpeed
+                            end
+                            -- don't lead through walls: stop the predicted point at the first obstacle in his path
+                            gunRp.FilterDescendantsInstances = { localPlayer.Character, char } -- invisible barriers do stop players
+                            local wall = v.Magnitude > 0 and workspace:Raycast(r.Position, aimAt - r.Position, gunRp)
+                            if wall then aimAt = wall.Position - (aimAt - r.Position).Unit * 1.5 end
+                            best, bs, bn, bd, bv, bc, bt = aimAt, s, char.Name, d, v, char, turn
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if not best then return nil end
+    gunShot = { t = gunShot.t, char = bc }
+    print(("[NekoGun] aim -> %s %.1f studs, %.0fpx from center, lead %.1f studs/s turn %.0f°/s, %.0fms + travel"):format(bn, bd, bs, bv.Magnitude, math.deg(bt), lead * 1000))
+    return (best - origin).Unit
+end
+-- FOV ring: rebuilt each run (stale one from older runs removed first)
+local oldFov = pg:FindFirstChild("NekoGunFov")
+if oldFov then oldFov:Destroy() end
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name, fovGui.ResetOnSpawn, fovGui.IgnoreGuiInset = "NekoGunFov", false, true -- full viewport, so its center = cam.ViewportSize/2
+local ring = Instance.new("Frame")
+ring.AnchorPoint, ring.Position, ring.BackgroundTransparency = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), 1
+Instance.new("UICorner", ring).CornerRadius = UDim.new(1, 0)
+local ringStroke = Instance.new("UIStroke", ring)
+ringStroke.Color, ringStroke.Thickness, ringStroke.Transparency = Color3.new(1, 1, 1), 1.5, 0.3
+ring.Parent = fovGui
+fovGui.Parent = pg
+local fovConn
+fovConn = RunService.RenderStepped:Connect(function()
+    if getgenv().NEKOHUB_ESP_RUN ~= RUN then fovConn:Disconnect() fovGui:Destroy() return end
+    local armed = AUTO.SilentGun == true and localPlayer.Character ~= nil and localPlayer.Character:FindFirstChild("Twist of Fate") ~= nil
+    if armed then trackVel() elseif next(gunHist) then table.clear(gunHist) end -- stale history would fake a velocity on resume
+    local show = armed and AUTO.GunCircle == true
+    if fovGui.Enabled ~= show then fovGui.Enabled = show end
+    local size = AUTO.GunFov * 2
+    if ring.Size.X.Offset ~= size then ring.Size = UDim2.fromOffset(size, size) end
+end)
+tofRemotes:WaitForChild("VisualizeBullet").OnClientEvent:Connect(function(start, _, speed)
+    if getgenv().NEKOHUB_ESP_RUN ~= RUN then return end
+    local hrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+    -- our own shot starts next to us; other survivors' shots are ignored
+    if not (hrp and typeof(start) == "Vector3" and (start - hrp.Position).Magnitude < 8) then return end
+    print(("[NekoGun] origin err %.2f studs"):format((hrp.CFrame:PointToWorldSpace(gunOffset) - start).Magnitude))
+    gunOffset = hrp.CFrame:PointToObjectSpace(start)
+    gunSpeed = tonumber(speed) or gunSpeed
+    local shot = gunShot
+    gunShot = nil
+    if not shot or os.clock() - shot.t > 1 then return end
+    gunDelay = gunDelay * 0.7 + (os.clock() - shot.t) * 0.3
+    local k = shot.char
+    if k then -- hit feedback for tuning: the Twist of Fate hit stuns the target
+        task.delay(1, function()
+            print(("[NekoGun] %s (fire->echo %.0fms)"):format(k:GetAttribute("IsStunned") and "hit" or "miss", gunDelay * 1000))
+        end)
+    end
+end)
+-- redirect by swapping the gun module's own `Fire` upvalue for a proxy: only its shots run our
+-- code (a __namecall hook would tax every namecall in the game, ~4.5us each). Luau copies the
+-- never-reassigned local into each closure, so every closure holding it gets patched
+local fireRemote = tofRemotes:WaitForChild("Fire")
+local genv = getgenv()
+genv.NekoGunAim = gunAim -- reruns re-point the shared proxy at their own aim function
+genv.NekoGunRemote = nil -- neuter __namecall hooks left by older builds in this session
+genv.NekoGunProxy = genv.NekoGunProxy or { FireServer = function(_, item, dir)
+    local ok, aim = pcall(genv.NekoGunAim, dir)
+    return fireRemote:FireServer(item, ok and aim or dir)
+end }
+local function patchGun()
+    if not (getgc and islclosure and debug.getupvalues and debug.setupvalue) then return end
+    local n = 0
+    for _, f in ipairs(getgc(false)) do
+        if type(f) == "function" and islclosure(f) then
+            for i, u in pairs(debug.getupvalues(f)) do
+                if u == fireRemote then
+                    debug.setupvalue(f, i, genv.NekoGunProxy)
+                    n = n + 1
+                end
+            end
+        end
+    end
+    if n > 0 then print(("[NekoGun] patched %d gun closures"):format(n)) end
+end
+patchGun()
+-- the gun's closures are (re)created when it's equipped / on respawn
+local function watchGun(char)
+    if not char then return end
+    char.ChildAdded:Connect(function(c)
+        if c.Name == "Twist of Fate" and getgenv().NEKOHUB_ESP_RUN == RUN then task.delay(0.5, patchGun) end
+    end)
+end
+watchGun(localPlayer.Character)
+localPlayer.CharacterAdded:Connect(watchGun)
+
+-- kill a stale status HUD from older runs
+local oldStatus = pg:FindFirstChild("NekoStatus")
+if oldStatus then oldStatus:Destroy() end
+-- unbend a flashlight weld left rotated by the removed flash-aim feature
+local fw = localPlayer.Character and localPlayer.Character:FindFirstChild("Flashlight")
+fw = fw and fw:FindFirstChildWhichIsA("Weld", true)
+if fw then fw.C1 = CFrame.new() end
 
 getgenv().GameAPI = {
     IsLobby    = function(p) return teamName(p) == "Spectator" end,
